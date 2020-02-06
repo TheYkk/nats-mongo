@@ -3,16 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"runtime"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"gopkg.in/mgo.v2/bson"
 
-	log "github.com/sirupsen/logrus"
+	"go.uber.org/zap"
 )
 
 type server struct {
@@ -20,28 +21,43 @@ type server struct {
 }
 
 type CLog struct {
-	Tag           string `json:"tag" bson:"tag"`
-	Log           string `json:"log" bson:"log"`
-	ContainerID   string `json:"container_id" bson:"container_id"`
-	ContainerName string `json:"container_name" bson:"container_name"`
-	Source        string `json:"source" bson:"source"`
+	Tag           string      `json:"tag" bson:"tag"`
+	Log           interface{} `json:"log" bson:"log"`
+	ContainerID   string      `json:"container_id" bson:"container_id"`
+	ContainerName string      `json:"container_name" bson:"container_name"`
+	Source        string      `json:"source" bson:"source"`
 }
 
-type ResponseNats struct {
-	Date   uint64
-	Loglar CLog
-}
+var sugar *zap.SugaredLogger
 
 func init() {
 
 	// do something here to set environment depending on an environment variable
-	log.SetLevel(log.TraceLevel)
-	if os.Getenv("APP_ENV") == "production" {
-		log.SetFormatter(&log.JSONFormatter{})
-	} else {
-		// The TextFormatter is default, you don't actually have to do this.
-		log.SetFormatter(&log.TextFormatter{})
+
+	rawJSON := []byte(`{
+	  "level": "debug",
+	  "encoding": "json",
+	  "outputPaths": ["stdout", "/tmp/logs"],
+	  "errorOutputPaths": ["stderr"],
+	  "encoderConfig": {
+	    "messageKey": "message",
+	    "levelKey": "level",
+	    "levelEncoder": "lowercase"
+	  }
+	}`)
+
+	var cfg zap.Config
+	if err := json.Unmarshal(rawJSON, &cfg); err != nil {
+		panic(err)
 	}
+	logger, err := cfg.Build()
+	if err != nil {
+		panic(err)
+	}
+	defer logger.Sync()
+
+	sugar = logger.Sugar()
+	sugar.Debug("Init app")
 
 }
 
@@ -51,7 +67,7 @@ func main() {
 	var s server
 	var err error
 	uri := os.Getenv("NATS_URI")
-	log.Debug(uri)
+	sugar.Debug(uri)
 	for i := 0; i < 5; i++ {
 		nc, err := nats.Connect(uri)
 		if err == nil {
@@ -59,43 +75,57 @@ func main() {
 			break
 		}
 
-		log.Debug("Waiting before connecting to NATS at:", uri)
+		sugar.Debug("Waiting before connecting to NATS at:", uri)
 		time.Sleep(1 * time.Second)
 	}
 	//defer s.nc.Close()
 	if err != nil {
-		log.Fatal("Error establishing connection to NATS:", err)
+		sugar.Fatal("Error establishing connection to NATS:", err)
 	}
 
-	log.Debug("@Connected to NATS at:", s.nc.ConnectedUrl())
+	sugar.Debug("@Connected to NATS at:", s.nc.ConnectedUrl())
 
-	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
-
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://root:ykk@localhost:27017"))
+	if err != nil {
+		sugar.Panic("mongo.Connect() ERROR:", err)
+	}
 	collection := client.Database("logging").Collection("logs")
 
 	// Subscribe
 	s.nc.Subscribe("logger.>", func(m *nats.Msg) {
-		//		log.Printf("%s: %s", m.Subject, m.Data)
+		print("Log comed")
 
-		// insert data to mongo
-		var arr []string
-		_ = json.Unmarshal(m.Data, &arr)
-		for _, dat := range arr {
+		var bulkLog [][]json.RawMessage
+		json.Unmarshal([]byte(string(m.Data)), &bulkLog)
 
-			log.Debug(dat)
-			res, err := collection.InsertOne(ctx, bson.D{})
+		// ? Loglar
+		for _, singleLog := range bulkLog {
+			var logum CLog
+
+			json.Unmarshal([]byte(string(singleLog[1])), &logum)
+			var bdoc interface{}
+			logstr := fmt.Sprintf("%v", logum.Log)
+			err = bson.UnmarshalJSON([]byte(logstr), &bdoc)
 			if err != nil {
-				log.Debug(err)
+				panic(err)
 			}
-			id := res.InsertedID
-			log.Debug(id)
+			logum.Log = bdoc
+
+			_, err := collection.InsertOne(context.TODO(), logum)
+
+			if err != nil {
+				sugar.Fatal(err)
+				//sugar.Debug(res)
+			}
+			context.TODO().Done()
+			// id := res.InsertedID
+			// sugar.Debug(id)
 		}
 
 	})
 	s.nc.Flush()
 	if err := s.nc.LastError(); err != nil {
-		log.Fatal(err)
+		sugar.Fatal(err)
 	}
 
 	runtime.Goexit()
