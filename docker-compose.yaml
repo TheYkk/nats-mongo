@@ -31,18 +31,30 @@ services:
     volumes:
       - "./fluent_bit.conf:/fluent-bit/etc/fluent-bit.conf:ro"
   log-generator:
-    image: chentex/random-logger:latest
+    image: theykk/log-gen:latest
     depends_on:
       - fluent-bit
     logging:
       driver: "fluentd"
       options:
         #fluentd-address: "fluent-bit"
-        tag: "logger.example"
+        tag: "logger.ykklogger"
         #mode: "non-blocking"
         #max-buffer-size: "2m"
         #fluentd-async-connect: "true"
+  mongo:
+    image: mongo:4.2
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ykk
+    ports:
+      - 27017:27017
+    volumes:
+      - MongoDB:/data/db
+    networks:
+      - nats-dash
 networks:
   nats-dash:
 volumes:
   nats:
+  MongoDB:
